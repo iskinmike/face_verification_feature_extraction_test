@@ -25,7 +25,10 @@ project ( patterns_compare CXX )
 set (CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --std=c++1y -g")
 
 set(SOURCES
-    src/main.cpp)
+    src/main.cpp
+    src/points_processor.cpp
+    src/histogram_calculate.cpp
+)
 
 #set ( LIBPATH  "/usr/local/lib" )
 set ( LIBPATH  "/home/mike/workspace/utils/opencv/debug_modules/lib")
@@ -39,6 +42,10 @@ set ( LIBPATH  "/home/mike/workspace/utils/opencv/debug_modules/lib")
 #    ${LIBPATH}/libopencv_contrib.so
     ${LIBPATH}/libopencv_features2d.so
     ${LIBPATH}/libopencv_imgcodecs.so
+    ${LIBPATH}/libopencv_face.so
+    ${LIBPATH}/libopencv_ml.so
+    ${LIBPATH}/libopencv_calib3d.so
+
     pthread
     /home/mike/workspace/utils/xlnt/build/source/libxlnt.so.1.2
 #    opencv_imgproc
