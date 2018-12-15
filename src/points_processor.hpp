@@ -143,6 +143,12 @@ public:
     void load_svm(std::string svm_path){
         svm = cv::ml::SVM::load(svm_path);
     }
+
+    void save_training_vectors(const std::string& path){
+        cv::FileStorage file(path, cv::FileStorage::WRITE);
+        // Write to file!
+        file << "Training" << training_vectors;
+    }
 };
 
 

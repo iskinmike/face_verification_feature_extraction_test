@@ -48,6 +48,7 @@ set ( LIBPATH  "/home/mike/workspace/utils/opencv/debug_modules/lib")
 
     pthread
     /home/mike/workspace/utils/xlnt/build/source/libxlnt.so.1.2
+    /home/mike/workspace/tmp/skynet/src/build/Builds/libskynet.so
 #    opencv_imgproc
     # ssl
     # crypto
@@ -60,7 +61,8 @@ set ( LIBPATH  "/home/mike/workspace/utils/opencv/debug_modules/lib")
 add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_include_directories ( ${PROJECT_NAME} BEFORE PRIVATE
-     /usr/local/include/opencv4
+    /usr/local/include/opencv4
+    /home/mike/workspace/tmp/skynet/cpp
 )
 
 target_link_libraries ( ${PROJECT_NAME} ${LIBS})

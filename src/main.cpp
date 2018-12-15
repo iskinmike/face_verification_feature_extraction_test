@@ -4,6 +4,9 @@
 #include "opencv4/opencv2/imgcodecs.hpp"
 #include "opencv4/opencv2/features2d.hpp"
 #include "opencv4/opencv2/objdetect.hpp"
+#include "opencv4/opencv2/face.hpp"
+#include "opencv4/opencv2/ml.hpp"
+#include "opencv4/opencv2/calib3d.hpp"
 //#include "opencv2/contrib/contrib.hpp"
 
 #include <iostream>
@@ -13,11 +16,21 @@
 #include <chrono>
 #include <fstream>
 #include <map>
+#include <sys/stat.h>
+#include <algorithm>
 
 #include "xlnt/xlnt.hpp"
+#include "points_processor.hpp"
+#include "histogram_calculate.hpp"
+
+#include "snNet.h"
+#include "snOperator.h"
+#include "snTensor.h"
+#include "snType.h"
 
 using namespace std;
 using namespace cv;
+namespace sn = SN_API;
 
 /** Function Headers */
 //void detectAndDisplay(Mat &frame );
@@ -28,6 +41,9 @@ String profile_face_cascade_name = "/usr/local/share/OpenCV/haarcascades/haarcas
 String eyes_cascade_name = "/usr/local/share/OpenCV/haarcascades/haarcascade_eye_tree_eyeglasses.xml";
 String mouth_cascade_name = "/usr/local/share/OpenCV/haarcascades/haarcascade_mcs_mouth.xml";
 String nose_cascade_name = "/usr/local/share/OpenCV/haarcascades/haarcascade_mcs_nose.xml";
+
+String landmark_model_path = "/home/mike/workspace/utils/opencv/debug_modules/share/opencv4/testdata/cv/face/face_landmark_model.dat";
+
 CascadeClassifier face_cascade;
 CascadeClassifier eyes_cascade;
 CascadeClassifier mouth_cascade;
@@ -54,169 +70,13 @@ struct face_data{
 cv::Mat get_image_parts(face_data data);
 
 
-//------------------------------------------------------------------------------
-// cv::elbp
-//------------------------------------------------------------------------------
-template <typename _Tp> static
-inline void elbp_(InputArray _src, OutputArray _dst, int radius, int neighbors) {
-    //get matrices
-    Mat src = _src.getMat();
-    // allocate memory for result
-    _dst.create(src.rows-2*radius, src.cols-2*radius, CV_32SC1);
-    Mat dst = _dst.getMat();
-    // zero
-    dst.setTo(0);
-    for(int n=0; n<neighbors; n++) {
-        // sample points
-        float x = static_cast<float>(radius * cos(2.0*CV_PI*n/static_cast<float>(neighbors)));
-        float y = static_cast<float>(-radius * sin(2.0*CV_PI*n/static_cast<float>(neighbors)));
-        // relative indices
-        int fx = static_cast<int>(floor(x));
-        int fy = static_cast<int>(floor(y));
-        int cx = static_cast<int>(ceil(x));
-        int cy = static_cast<int>(ceil(y));
-        // fractional part
-        float ty = y - fy;
-        float tx = x - fx;
-        // set interpolation weights
-        float w1 = (1 - tx) * (1 - ty);
-        float w2 =      tx  * (1 - ty);
-        float w3 = (1 - tx) *      ty;
-        float w4 =      tx  *      ty;
-        // iterate through your data
-        for(int i=radius; i < src.rows-radius;i++) {
-            for(int j=radius;j < src.cols-radius;j++) {
-                // calculate interpolated value
-                float t = static_cast<float>(w1*src.at<_Tp>(i+fy,j+fx) + w2*src.at<_Tp>(i+fy,j+cx) + w3*src.at<_Tp>(i+cy,j+fx) + w4*src.at<_Tp>(i+cy,j+cx));
-                // floating point precision, so check some machine-dependent epsilon
-                dst.at<int>(i-radius,j-radius) += ((t > src.at<_Tp>(i,j)) || (std::abs(t-src.at<_Tp>(i,j)) < std::numeric_limits<float>::epsilon())) << n;
-            }
-        }
-    }
-}
-
-static void elbp(InputArray src, OutputArray dst, int radius, int neighbors)
-{
-    int type = src.type();
-    switch (type) {
-    case CV_8SC1:   elbp_<char>(src,dst, radius, neighbors); break;
-    case CV_8UC1:   elbp_<unsigned char>(src, dst, radius, neighbors); break;
-    case CV_16SC1:  elbp_<short>(src,dst, radius, neighbors); break;
-    case CV_16UC1:  elbp_<unsigned short>(src,dst, radius, neighbors); break;
-    case CV_32SC1:  elbp_<int>(src,dst, radius, neighbors); break;
-    case CV_32FC1:  elbp_<float>(src,dst, radius, neighbors); break;
-    case CV_64FC1:  elbp_<double>(src,dst, radius, neighbors); break;
-    default:
-        String error_msg = format("Using Original Local Binary Patterns for feature extraction only works on single-channel images (given %d). Please pass the image data as a grayscale image!", type);
-        std::cout << "Error: " << error_msg << std::endl;
-//        CV_Error(Error::StsNotImplemented, error_msg);
-        break;
-    }
-}
-static Mat elbp(InputArray src, int radius, int neighbors) {
-    Mat dst;
-    elbp(src, dst, radius, neighbors);
-    return dst;
-}
-
-static Mat
-histc_(const Mat& src, int minVal=0, int maxVal=255, bool normed=false)
-{
-    Mat result;
-    // Establish the number of bins.
-    int histSize = maxVal-minVal+1;
-    // Set the ranges.
-    float range[] = { static_cast<float>(minVal), static_cast<float>(maxVal+1) };
-    const float* histRange = { range };
-    // calc histogram
-    calcHist(&src, 1, 0, Mat(), result, 1, &histSize, &histRange, true, false);
-    // normalize
-    if(normed) {
-        result /= (int)src.total();
-    }
-    return result.reshape(1,1);
-}
-
-static Mat histc(InputArray _src, int minVal, int maxVal, bool normed)
-{
-    Mat src = _src.getMat();
-    switch (src.type()) {
-        case CV_8SC1:
-            return histc_(Mat_<float>(src), minVal, maxVal, normed);
-            break;
-        case CV_8UC1:
-            return histc_(src, minVal, maxVal, normed);
-            break;
-        case CV_16SC1:
-            return histc_(Mat_<float>(src), minVal, maxVal, normed);
-            break;
-        case CV_16UC1:
-            return histc_(src, minVal, maxVal, normed);
-            break;
-        case CV_32SC1:
-            return histc_(Mat_<float>(src), minVal, maxVal, normed);
-            break;
-        case CV_32FC1:
-            return histc_(src, minVal, maxVal, normed);
-            break;
-    }
-//    CV_Error(Error::StsUnmatchedFormats, "This type is not implemented yet.");
-    std::cout << "Error: " << "This type is not implemented yet." << std::endl;
-}
-
-static Mat spatial_histogram(InputArray _src, int numPatterns,
-                             int grid_x, int grid_y, bool /*normed*/)
-{
-    Mat src = _src.getMat();
-    // calculate LBP patch size
-    int width = src.cols/grid_x;
-    int height = src.rows/grid_y;
-    // allocate memory for the spatial histogram
-    Mat result = Mat::zeros(grid_x * grid_y, numPatterns, CV_32FC1);
-    // return matrix with zeros if no data was given
-    if(src.empty())
-        return result.reshape(1,1);
-    // initial result_row
-    int resultRowIdx = 0;
-    // iterate through grid
-    for(int i = 0; i < grid_y; i++) {
-        for(int j = 0; j < grid_x; j++) {
-            Mat src_cell = Mat(src, Range(i*height,(i+1)*height), Range(j*width,(j+1)*width));
-            Mat cell_hist = histc(src_cell, 0, (numPatterns-1), true);
-            // copy to the result matrix
-            Mat result_row = result.row(resultRowIdx);
-            cell_hist.reshape(1,1).convertTo(result_row, CV_32FC1);
-            // increase row count in result matrix
-            resultRowIdx++;
-        }
-    }
-    // return result as reshaped feature vector
-    return result.reshape(1,1);
-}
-
-void calculate_histogram(InputArray src, int _radius, int _neighbors, int _grid_x, int _grid_y,
-        Mat& lbp_image, Mat& histogram_image){
-    // calculate lbp image
-    lbp_image = elbp(src, _radius, _neighbors);
-    Mat tmp = lbp_image.clone();
-    // get spatial histogram from this lbp image
-    histogram_image = spatial_histogram(
-            tmp, /* lbp_image */
-            static_cast<int>(std::pow(2.0, static_cast<double>(_neighbors))), /* number of possible patterns */
-            _grid_x, /* grid size x */
-            _grid_y, /* grid size y */
-            true);
-    // add to templates
-}
-
-
 Mat load_image(std::string image_path) {
   Mat image;
   image = imread(image_path.c_str(), IMREAD_GRAYSCALE); // Read the file
   if( image.empty() )                      // Check for invalid input
   {
     cout <<  "Could not open or find the image [" << image_path << "]" << std::endl ;
-    return image;
+//    return image;
   }
 
 //  cv::Mat frame_gray;
@@ -843,31 +703,408 @@ cv::Mat compare_two_images(cv::Mat orig_image1, cv::Mat orig_image2){
 //}
 
 
+vector< vector<Point2f> > test_landmark(const cv::Mat& image, vector<Rect>& faces) {
+//    CascadeClassifier face_cascade;
+//    face_cascade.load(cascade_name);
+    Mat img = image.clone();
+    Ptr<cv::face::Facemark> facemark = cv::face::createFacemarkKazemi();
+    facemark->loadModel(landmark_model_path);
+    std::cout << "Loaded model" << std::endl;
+
+    cv::Mat test_imgae = img.clone();
+//    resize(img,test_imgae,Size(460,460),0,0,INTER_LINEAR_EXACT);
+
+    vector< vector<Point2f> > shapes;
+    if (facemark->fit(test_imgae,faces,shapes))
+    {
+        for ( size_t i = 0; i < faces.size(); i++ )
+        {
+            cv::rectangle(img,faces[i],Scalar( 255, 0, 0 ));
+        }
+        for (unsigned long i=0;i<faces.size();i++){
+            for(unsigned long k=20;k<shapes[i].size();k++) {
+                cv::circle(img,shapes[i][k],1,cv::Scalar(0,0,255),FILLED);
+                cv::putText(img, std::to_string(k), shapes[i][k],FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255));
+            }
+        }
+        namedWindow("Detected_shape");
+        imshow("Detected_shape", img);
+        imwrite("shape.png", img);
+        waitKey(10);
+    }
+    return shapes;
+}
+
+// SVM
+
+struct point_data{
+    cv::Point2f point;
+    int point_class;
+};
+
+struct svm_data{
+//    vector<point_data> points;
+    vector<cv::Point2f> points;
+    vector<int> point_classes;
+};
+
+
+cv::Mat create_svm_training_data(vector<cv::Point2f>& points){
+    int dimension = 2;
+    cv::Mat training_data(points.size(), dimension, CV_32F);
+
+    for(int i = 0; i < points.size(); ++i) {
+        training_data.at<float>(i, 0) = points[i].x;
+        training_data.at<float>(i, 1) = points[i].y;
+    }
+
+    return training_data;
+}
+
+
+
+void apply_svm(cv::Mat& training_data, cv::Mat& lables, svm_data& data){
+//    const int points_data_dimension = 2;
+
+    // Train the SVM
+    Ptr<cv::ml::SVM> svm = cv::ml::SVM::create();
+    svm->setType(cv::ml::SVM::C_SVC);
+    svm->setKernel(cv::ml::SVM::LINEAR);
+    svm->setTermCriteria(TermCriteria(TermCriteria::MAX_ITER, 100, 1e-6));
+    svm->train(training_data, cv::ml::ROW_SAMPLE, lables);
+
+    // Data for visual representation
+    int width = 512, height = 512;
+    Mat image = Mat::zeros(height, width, CV_8UC3);
+
+    // Show the decision regions given by the SVM
+    Vec3b green(0,255,0), blue(255,0,0);
+    for (int i = 0; i < image.rows; i++)
+    {
+        for (int j = 0; j < image.cols; j++)
+        {
+            Mat sampleMat = (Mat_<float>(1,training_data.cols) << j,i);
+            float response = svm->predict(sampleMat);
+            if (response == 1)
+                image.at<Vec3b>(i,j)  = green;
+            else if (response == -1)
+                image.at<Vec3b>(i,j)  = blue;
+        }
+    }
+    // Show the training data
+    int thickness = -1;
+
+    int counter = 0;
+    std::for_each(data.points.begin(), data.points.end(), [&image, &counter, &data](cv::Point2f point){
+        if (data.point_classes[counter] == 1) {
+            circle( image, point, 5, Scalar(  0x0A,   0x67,   0xA3), -1 );
+        } else {
+            circle( image, point, 5, Scalar(  0xFF,   0xB4,   0x8C), -1 );
+        }
+        counter++;
+    });
+//    circle( image, Point(255,  10), 5, Scalar(255, 255, 255), thickness );
+//    circle( image, Point(501, 255), 5, Scalar(255, 255, 255), thickness );
+//    circle( image, Point( 10, 501), 5, Scalar(255, 255, 255), thickness );
+    // Show support vectors
+    thickness = 2;
+    Mat sv = svm->getUncompressedSupportVectors();
+    for (int i = 0; i < sv.rows; i++)
+    {
+        const float* v = sv.ptr<float>(i);
+        circle(image,  Point( (int) v[0], (int) v[1]), 6, Scalar(128, 128, 128), thickness);
+    }
+    imwrite("result.png", image);        // save the image
+    imshow("SVM Simple Example", image); // show it to the user
+    waitKey();
+}
+
+void apply_svm(svm_data& data){
+    const int classes_data_dimension = 1;
+
+    //    cv::Mat training_data(points_data_dimension, data.points.size(), CV_32F, data.points.data());
+    cv::Mat training_data = create_svm_training_data(data.points);
+    cv::Mat lables(classes_data_dimension, data.point_classes.size(), CV_32SC1, data.point_classes.data());
+
+    apply_svm(training_data, lables, data);
+}
+
+cv::Mat unisize_image(cv::Mat input, cv::Rect aoi){
+    cv::Mat image;
+    cv::resize(input(aoi), image, cv::Size(400,400));
+    return image;
+}
+
+cv::Mat get_landmarks(const std::string path, vector< vector<Point2f> >& shapes){
+    cv::Mat test_image = imread(path);
+    cascade_settings set;
+    set.data.image = test_image;
+    set.scale_face = 1.2;
+    set.neighbors_face = 3;
+    set.min_size_face = cv::Size(10,10);
+
+    face_cascade.detectMultiScale( set.data.image, set.data.faces, set.scale_face, set.neighbors_face,
+                                   CASCADE_SCALE_IMAGE, set.min_size_face );
+
+    if (set.data.faces.size()) {
+        cv::Rect face = set.data.faces[0];
+
+        cv::Mat fece_rect_img = test_image.clone();
+        cv::rectangle(fece_rect_img,face,Scalar( 255, 0, 0 ),2);
+        cv::imwrite(path + ".face_rect.png", fece_rect_img);
+
+        const float scale_factor = 1.2;
+        const float scale_shift = (scale_factor - 1)/2;
+
+        std::cout << "image : "
+                  << test_image.cols << " | "
+                  << test_image.rows << " | "
+                  << std::endl;
+
+        std::cout << "face: "
+                  << face.x << " | "
+                  << face.y << " | "
+                  << face.width << " | "
+                  << face.height << " | "
+                  << std::endl;
+
+        int pos_x = face.x - face.width*scale_shift;
+        int pos_y = face.y - face.height*scale_shift;
+        int width = face.width*scale_factor;
+        int height = face.height*scale_factor;
+
+        if (pos_y < 1) pos_y = 1;
+        if (pos_x < 1) pos_x = 1;
+
+        if ((width + pos_x) > test_image.cols ) width = test_image.cols-1 - pos_x;
+        if ((height + pos_y) > test_image.rows ) height = test_image.rows-1 - pos_y;
+
+        std::cout << "face sized: "
+                  << pos_x << " | "
+                  << pos_y << " | "
+                  << width << " | "
+                  << height << " | "
+                  << std::endl;
+        cv::Rect crop_part(pos_x, pos_y, width, height);
+
+        set.data.faces[0].x = face.width*scale_shift;
+        set.data.faces[0].y = face.height*scale_shift;
+
+        cv::Mat crop = unisize_image(test_image, crop_part);//test_image(crop_part);
+
+        cv::imwrite(path + ".face.png", crop);
+
+        set.data.faces.clear();
+        std::cout << "detect scaled face" << std::endl;
+        face_cascade.detectMultiScale( crop, set.data.faces, set.scale_face, set.neighbors_face,
+                                       CASCADE_SCALE_IMAGE, set.min_size_face );
+
+        namedWindow("Detected_shape");
+
+//        imshow("Detected_shape",crop);
+//        waitKey(0);
+//        cv::rectangle(crop,set.data.faces[0],Scalar( 255, 0, 0 ));
+//        imshow("Detected_shape",crop);
+//        waitKey(0);
+
+        shapes = test_landmark(crop, set.data.faces);
+        cv::Mat img = crop.clone();
+
+        for (unsigned long i=0;i<set.data.faces.size();i++){
+            for(unsigned long k=0;k<shapes[i].size();k++) {
+                cv::circle(img,shapes[i][k],2,cv::Scalar(255,0,0),FILLED);
+//                cv::putText(img, std::to_string(k), shapes[i][k],FONT_HERSHEY_SIMPLEX, 0.4, (255,255,255));
+            }
+            cv::imwrite(path + ".points68.png", img);
+        }
+
+        cv::Mat selected_points = crop.clone();
+        std::vector<size_t> pts = {31, 32, 33, 34, 35,
+            27, 28, 29, 30,
+            21, 22,
+            48, 54, 59, 55, 49, 53,
+            36, 37, 38, 39, 40, 41,
+            42, 43, 44, 45, 46, 47};
+        for (auto& el: pts) {
+            cv::circle(selected_points, shapes[0][el],2,cv::Scalar(255,0,0),FILLED);
+        }
+        cv::imwrite(path + ".points29.png", selected_points);
+
+        cv::Mat rectangle_points = crop.clone();
+        cv::Mat lbp_readey;
+        cv::cvtColor(crop, lbp_readey, COLOR_RGB2GRAY);
+        cv::Mat lbp_rectangles;
+        cv::Mat hist_rectangles;
+        calculate_histogram(lbp_readey, 1, 8, 8, 8,
+                lbp_rectangles, hist_rectangles);
+        cv::imwrite(path + ".lbp.png", lbp_rectangles);
+        int counter = 0;
+        for (auto& el: pts) {
+            int x = shapes[0][el].x - 16;
+            int y = shapes[0][el].y - 16;
+            cv::Rect rect(x,y,32,32);
+            cv::imwrite(path + ".lbp_rect_"+ std::to_string(counter) + ".png", lbp_rectangles(rect));
+            counter++;
+        }
+        for (auto& el: pts) {
+            int x = shapes[0][el].x - 16;
+            int y = shapes[0][el].y - 16;
+            cv::Rect rect(x,y,32,32);
+            cv::rectangle(rectangle_points,rect,Scalar( 255, 0, 0 ),2);
+            cv::rectangle(lbp_rectangles,rect,Scalar( 0, 0, 0 ),2);
+            cv::circle(rectangle_points, shapes[0][el],2,cv::Scalar(255,0,0),FILLED);
+        }
+        cv::imwrite(path + ".points_rectangles.png", rectangle_points);
+        cv::imwrite(path + ".lbp_rectangles.png", lbp_rectangles);
+
+        return crop;
+    }
+    return cv::Mat();
+}
+
+cv::Mat get_homography_matrix(std::vector<cv::Point2f> src, std::vector<cv::Point2f> dest){
+    cv::Mat h = cv::findHomography(src, dest);
+//    cout << "H:\n" << h << endl;
+    return h;
+}
+
+
+std::vector<std::string> get_paths(const std::string& data, int limit){
+    std::fstream data_file(data, std::ios_base::in);
+    std::vector<char> path_buf(256);
+    std::vector<std::string> dataset_paths;
+    int counter = 0;
+    while (data_file.getline(path_buf.data(), path_buf.size())){
+        std::string path(path_buf.data());
+        Mat image = load_image(path);
+        if (image.empty()) continue;
+        dataset_paths.push_back(path);
+        if (counter >= limit) {
+            break;
+        }
+        counter++;
+    }
+    return dataset_paths;
+}
+
+std::vector<std::string> get_paths(const std::string& data){
+    return get_paths(data, 5);
+}
+
+vector< face_matcher::training_data > get_training_data(const std::vector<std::string>& dataset_paths, face_matcher::match_index match_index){
+    vector< face_matcher::training_data > training_data;
+    vector< vector<Point2f> > shapes;
+    int test = dataset_paths.size();
+//    std::for_each(dataset_paths.begin(), dataset_paths.end(), [&shapes, &training_data, &match_index] (auto path){
+    for (auto& path : dataset_paths) {
+        vector< vector<Point2f> > shapes_possible;
+        cv::Mat res_image = get_landmarks(path, shapes_possible);
+        if (shapes_possible.size()) {
+            shapes.push_back(shapes_possible[0]);
+            points_processor processor(res_image, shapes_possible[0]);
+            processor.generate_first_layer();
+            face_matcher::training_data tmp;
+            tmp.value = processor.get_data();
+            tmp.index = match_index;
+            training_data.push_back(tmp);
+        }
+    }
+    return training_data;
+}
+
+
+cv::Mat load_test_sample(const std::string& path){
+    vector< vector<Point2f> > shapes_possible;
+    cv::Mat res_image = get_landmarks(path, shapes_possible);
+    cv::Mat res;
+    if (shapes_possible.size() && !res_image.empty()) {
+        points_processor processor(res_image, shapes_possible[0]);
+        processor.generate_first_layer();
+
+
+
+        res = face_matcher::construct_data_vector(processor.get_data());
+    }
+    return res;
+}
+
+inline bool exists_test3(const std::string& name) {
+  struct stat buffer;
+  return (stat(name.c_str(), &buffer) == 0);
+}
+
+void matrix_to_vector(const cv::Mat& orig, cv::Mat& dest){
+    std::vector<cv::Mat> rows;
+
+    for (int i = 0; i < orig.rows; ++i) {
+        rows.push_back(orig.row(i));
+    }
+
+    cv::hconcat(rows, dest);
+}
+
+
+
+void remove_tested(std::vector<std::string>& paths, const std::string& path_to_data) {
+    std::fstream in_file(path_to_data, std::ios_base::in);
+    std::vector<char> path_buf(256);
+    while(in_file.getline(path_buf.data(), path_buf.size())){
+        std::string path(path_buf.data());
+        path = path.substr(0, path.find(' '));
+        paths.erase( std::remove( paths.begin(), paths.end(), path), paths.end() );
+    }
+}
+
+
+void run_cnn(){
+//    sn::Net snet;
+
+//    snet.addNode("Input", sn::Input(), "C1")
+//        .addNode("C1", sn::Convolution(15, 0, sn::calcMode::CPU), "C2")
+//        .addNode("C2", sn::Convolution(15, 0, sn::calcMode::CPU), "P1")
+//        .addNode("P1", sn::Pooling(sn::calcMode::CPU), "FC1")
+//        .addNode("FC1", sn::FullyConnected(128, sn::calcMode::CPU), "FC2")
+//        .addNode("FC2", sn::FullyConnected(10, sn::calcMode::CPU), "LS")
+//        .addNode("LS", sn::LossFunction(sn::lossType::softMaxToCrossEntropy), "Output");
+
+////    snet.training()
+
+//    sn::snLSize
+
+//    cout << "Hello " <<  SN_API::versionLib() << endl;
+}
+
 
 /** @function main */
 int main( int argc, const char** argv )
 {
-    std::string reference_path = "/home/mike/workspace/tmp/histogram_matcher/resources/mike/test0.png";
+//    std::string reference_path = "/home/mike/workspace/tmp/histogram_matcher/resources/mike/test0.png";
 //    std::string reference_path = "/home/mike/workspace/tmp/histogram_matcher/cube/0001.png";
 
 //    std::string test_path = "/home/mike/workspace/tmp/histogram_matcher/cube/0003.png";
-    std::string test_path = "/home/mike/workspace/tmp/histogram_matcher/resources/ilya/test50.png";
+//    std::string test_path = "/home/mike/workspace/tmp/histogram_matcher/resources/ilya/test50.png";
 //    std::string reference_path = "/home/mike/workspace/tmp/histogram_matcher/test.png";
-    std::string path_to_images_collection = "/home/mike/workspace/tmp/histogram_matcher/resources/all_data.txt";
+//    std::string path_to_images_collection = "/home/mike/workspace/tmp/histogram_matcher/resources/all_data.txt";
 //    std::string path_to_images_collection = "/home/mike/worksls pace/tmp/opencv_crop/resource/data.txt";
     // Получить эталонную фотку
-    if (argc>1) reference_path = argv[1];
-    if (argc>2) path_to_images_collection = argv[2];
+//    if (argc>1) reference_path = argv[1];
+//    if (argc>2) path_to_images_collection = argv[2];
 
-    std::fstream data_file(path_to_images_collection, std::ios_base::in);
+//    std::fstream data_file(path_to_images_collection, std::ios_base::in);
     std::fstream out_file("match_result.txt", std::ios_base::out);
-    std::vector<char> path_buf(256);
+//    std::vector<char> path_buf(256);
 
-    Mat reference_image = load_image(reference_path);
-    Mat reference_lbp_image;
-    Mat reference_histogram_image;
-    calculate_histogram(reference_image, 1, 8, 8, 8,
-                        reference_lbp_image, reference_histogram_image);
+//    Mat reference_image = load_image(reference_path);
+//    Mat reference_lbp_image;
+//    Mat reference_histogram_image;
+//    calculate_histogram(reference_image, 1, 8, 8, 8,
+//                        reference_lbp_image, reference_histogram_image);
+
+//    std::string dataset_path = "/home/mike/workspace/tmp/opencv_patterns_compare/resources/align_mike/data.txt";
+//    std::fstream dataset_file(dataset_path, std::ios_base::in);
+//    std::string debug_window_name = "debug";
+
+
 
 //    cv::Mat test_img = Mat(reference_lbp_image.rows, reference_lbp_image.cols, CV_8UC1);
 //    reference_lbp_image.convertTo(test_img, CV_8UC1);
@@ -886,18 +1123,177 @@ int main( int argc, const char** argv )
 //    auto facemark = cv::crea
 
 
+
+//    cv::Mat tt;
+
+//    cv::Mat row_1(1,5, CV_8UC1, cv::Scalar(1));
+//    cv::Mat row_2(1,5, CV_8UC1, cv::Scalar(2));
+//    std::cout << "size:" << row_1.rows << " | " << row_1.cols << std::endl;
+//    std::cout << "size:" << row_2.rows << " | " << row_2.cols << std::endl;
+//    for (int i = 0; i < 5; ++i) row_1.at<int>(0,i) = 1;
+//    for (int i = 0; i < 5; ++i) row_2.at<int>(0,i) = 2;
+
+//    std::vector<cv::Mat> vc;
+//    vc.push_back(row_1);
+//    vc.push_back(row_2);
+
+////    cv::hconcat(row_1, tt);
+////    std::cout << "Test image: " << tt << std::endl;
+//    cv::hconcat(vc, tt);
+//    std::cout << "Test image: " << tt << std::endl;
+////    tt.push_back(row_1);
+////    tt.push_back(row_2);
+//    std::cout << "size:" << tt.rows << " | " << tt.cols << std::endl;
+
+//    cv::Mat m(3,3, CV_8UC1, cv::Scalar(1));
+//    std::cout << m << std::endl;
+//    cv::Mat dest;
+//    matrix_to_vector(m, dest);
+//    std::cout << dest << std::endl;
+//    dest.convertTo(dest, CV_32F, 1.0 / 255, 0);
+//    std::cout << dest << std::endl;
+
+//    return 0;
+
+
     //-- 1. Load the cascades
     if( !face_cascade.load( face_cascade_name ) ){ printf("--(!)Error loading face_cascade\n"); return -1; };
     if (!eyes_cascade.load(eyes_cascade_name)) {std::cout << "error load eye cascade" << std::endl;}
     if (!mouth_cascade.load(mouth_cascade_name)) {std::cout << "error load mouth cascade" << std::endl;}
     if (!nose_cascade.load(nose_cascade_name)) {std::cout << "error load nose cascade" << std::endl;}
 
+//    namedWindow(debug_window_name);
 
-    face_data img1 = get_face_data(reference_path);
-    face_data img2 = get_face_data(test_path);
+    std::string path_to_test_data = "/home/mike/workspace/tmp/opencv_patterns_compare/resources/align_data.txt";
+    std::string path_to_result_data = "svm_result.txt";
+    if (argc>1) path_to_test_data = argv[1];
+    if (argc>2) path_to_result_data = argv[2];
 
-    cv::imwrite("prc1.png", get_image_parts(img1));
-    cv::imwrite("prc2.png", get_image_parts(img2));
+//    std::fstream out_data(path_to_out_data, std::ios_base::out);
+
+
+    std::string svm_path = "/home/mike/workspace/tmp/opencv_patterns_compare/build/svm_data.txt";
+    if (exists_test3(svm_path)) {
+        // load svm
+        face_matcher matcher;
+        matcher.load_svm(svm_path);
+        std::string samples_file = path_to_test_data;
+        std::vector<std::string> samples_paths = get_paths(samples_file, 500);
+        remove_tested(samples_paths, path_to_result_data);
+        std::fstream svm_result(path_to_result_data, std::ios_base::app);
+        for (auto& path: samples_paths) {
+            std::cout << path << std::endl;
+
+            cv::Mat test_sample;
+            try {
+                test_sample = load_test_sample(path);
+                std::string dump =path.append(".mat");
+                cv::FileStorage file(dump, cv::FileStorage::WRITE);
+                // Write to file!
+                file << "Training" << test_sample;
+            } catch (...) {
+                std::cout << "Assert error: [" << path << "]" << std::endl;
+                continue;
+            }
+            if (test_sample.empty()) continue;
+            cv::Mat result;
+            float res = matcher.predict(test_sample, result);
+
+            std::cout << "predict res: " << res << std::endl;
+            std::cout << "result matrix: " << result << std::endl;
+            svm_result << path << " res: [" << res << "][" << result << "]" << std::endl;
+        }
+
+        return 0;
+    }
+
+
+
+    // Получить точки
+//    face_matcher::training_data training_data;
+    std::string mike_collection = "/home/mike/workspace/tmp/opencv_patterns_compare/resources/align_mike/data.txt";
+    std::vector<std::string> mike_paths = get_paths(mike_collection);
+    vector< face_matcher::training_data > mikes_training_data = get_training_data(mike_paths, face_matcher::match_index::match);
+
+//    std::string ilya_collection = "/home/mike/workspace/tmp/opencv_patterns_compare/resources/align_ilya/data.txt";
+    std::string ilya_collection = "/home/mike/workspace/tmp/opencv_patterns_compare/resources/train_negative.txt";
+    std::vector<std::string> ilya_paths = get_paths(ilya_collection, 30);
+    vector< face_matcher::training_data > ilyas_training_data = get_training_data(ilya_paths, face_matcher::match_index::not_match);
+
+    vector< face_matcher::training_data > training_data;
+
+    training_data.insert(training_data.end(), mikes_training_data.begin(), mikes_training_data.end());
+    training_data.insert(training_data.end(), ilyas_training_data.begin(), ilyas_training_data.end());
+
+//    vector< vector<Point2f> > shapes;
+//    face_matcher::match_index match_index = face_matcher::match_index::match;
+//    std::for_each(dataset_paths.begin(), dataset_paths.end(), [&shapes, &training_data, &match_index] (auto path){
+//        vector< vector<Point2f> > shapes_possible;
+//        cv::Mat res_image = get_landmarks(path, shapes_possible);
+//        if (shapes_possible.size()) {
+//            shapes.push_back(shapes_possible[0]);
+//            points_processor processor(res_image, shapes_possible[0]);
+//            processor.generate_first_layer();
+//            face_matcher::training_data tmp;
+//            tmp.value = processor.get_data();
+//            tmp.index = match_index;
+//            training_data.push_back(tmp);
+//        }
+//    });
+
+//    std::cout << "shapes: [" << shapes.size() << "]" << std::endl;
+
+//    vector<Point2f> orig = shapes[0];
+//    std::for_each(shapes.begin(), shapes.end(), [&orig] (auto dest) {
+//        get_homography_matrix(orig, dest);
+//    });
+
+    // Теперь нужно эти точки привести к единому изображению
+    // Пусть пока это будет первое изображение
+    std::cout << "Dump training vectors ..." << std::endl;
+
+    face_matcher mike_saver;
+    mike_saver.fill_training_data(mikes_training_data);
+    mike_saver.save_training_vectors("mikes_training_data.mat");
+
+    face_matcher ilya_saver;
+    ilya_saver.fill_training_data(ilyas_training_data);
+    ilya_saver.save_training_vectors("ilya_training_data.mat");
+
+    // Делаем обработку точек
+    face_matcher matcher;
+    matcher.fill_training_data(training_data);
+    cv::Mat test = matcher.get_training_vectors();
+
+    imwrite("test_vectors.png", test);
+
+    std::cout << "test_vectors: " << test.cols << std::endl;
+    std::cout << "test_vectors: " << test.rows << std::endl;
+    out_file << test;
+
+    std::vector<int> tmp = matcher.get_lables();
+    for(auto& el: tmp) {
+        std::cout << el << std::endl;
+    }
+
+    matcher.apply_svm("svm_data.txt");
+
+    std::string sample_path = "/home/mike/workspace/tmp/opencv_patterns_compare/resources/align_mike/photo_14.png";
+    cv::Mat test_sample = load_test_sample(sample_path);
+    cv::Mat result;
+    float res = matcher.predict(test_sample, result);
+
+    std::cout << "predict res: " << res << std::endl;
+    std::cout << "result matrix: " << result.rows << " | " << result.cols << std::endl;
+    std::cout << "result matrix: " << result << std::endl;
+
+    return 0;
+
+//    face_data img1 = get_face_data(reference_path);
+//    face_data img2 = get_face_data(test_path);
+
+//    cv::imwrite("prc1.png", get_image_parts(img1));
+//    cv::imwrite("prc2.png", get_image_parts(img2));
 
     int nfeatures=50;
     float scaleFactor=1.2f;
@@ -920,16 +1316,92 @@ int main( int argc, const char** argv )
     );
 
 
-    if (img1.noses.size() && img2.noses.size()) {
-        cv::Mat nose1 = img1.image(img1.noses[0]);
-        cv::Mat nose2 = img2.image(img2.noses[0]);
+//    if (img1.noses.size() && img2.noses.size()) {
+//        cv::Mat nose1 = img1.image(img1.noses[0]);
+//        cv::Mat nose2 = img2.image(img2.noses[0]);
 
-        cv::Mat match_result = compare_two_images(nose1, nose2);
+//        cv::Mat match_result = compare_two_images(nose1, nose2);
 
-        cv::imwrite("match_result.png", match_result);
-    } else {
-        std::cout << "not found some parts" << std::endl;
+//        cv::imwrite("match_result.png", match_result);
+//    } else {
+//        std::cout << "not found some parts" << std::endl;
+//    }
+
+//    cv::Mat test_image = imread("/home/mike/workspace/tmp/wilton_video_handler/build/photo.png");
+//    cascade_settings set;
+//    set.data.image = test_image;
+//    set.scale_face = 1.2;
+//    set.neighbors_face = 3;
+//    set.min_size_face = cv::Size(10,10);
+
+//    face_cascade.detectMultiScale( set.data.image, set.data.faces, set.scale_face, set.neighbors_face,
+//                                   CASCADE_SCALE_IMAGE, set.min_size_face );
+
+//    if (set.data.faces.size()) {
+//        cv::Rect face = set.data.faces[0];
+//        int pos_x = face.x - face.width/2;
+//        int pos_y = face.y - face.height/2;
+//        int width = face.width*2;
+//        int height = face.height*2;
+//        cv::Rect crop_part(pos_x, pos_y, width, height);
+
+//        set.data.faces[0].x = face.width/2;
+//        set.data.faces[0].y = face.height/2;
+
+//        cv::Mat crop = test_image(crop_part);
+//        namedWindow("Detected_shape");
+//        imshow("Detected_shape",crop);
+//        waitKey(0);
+////        cv::rectangle(crop,set.data.faces[0],Scalar( 255, 0, 0 ));
+////        imshow("Detected_shape",crop);
+////        waitKey(0);
+//        test_landmark(crop, set.data.faces);
+//    }
+
+
+    svm_data svm;
+    std::string path_1 = "/home/mike/workspace/tmp/opencv_patterns_compare/mike.png";
+    vector< vector<Point2f> > shapes_1;
+    std::cout << "Test image: " << path_1 << std::endl;
+    get_landmarks(path_1, shapes_1);
+
+    std::string path_2 = "/home/mike/workspace/dataset/downey_1.jpg";
+    vector< vector<Point2f> > shapes_2;
+    std::cout << "Test image: " << path_2 << std::endl;
+    get_landmarks(path_2, shapes_2);
+
+    std::cout << "Test svm: " << std::endl;
+    if (shapes_1.size() && shapes_2.size()) {
+        std::cout << "Size 1 image: " << shapes_1[0].size() << std::endl;
+        std::cout << "Size 2 image: " << shapes_2[0].size() << std::endl;
+        size_t size = shapes_1[0].size() + shapes_2[0].size();
+        svm.points.reserve(size);
+        svm.point_classes.reserve(size);
+
+        svm.points.insert(svm.points.end(), shapes_1[0].begin(), shapes_1[0].end());
+        svm.point_classes.insert(svm.point_classes.end(), shapes_1[0].size(), 1);
+
+        svm.points.insert(svm.points.end(), shapes_2[0].begin(), shapes_2[0].end());
+        svm.point_classes.insert(svm.point_classes.end(), shapes_2[0].size(), -1);
+
+//        cv::findHomography();
+        apply_svm(svm);
     }
+
+
+
+//    svm.point_classes = vector<int>{1,1,1,-1,-1,-1};
+//    svm.points = vector<cv::Point2f>{{1,1},{1,2},{1,3},{4,5},{5,6},{4,7}};
+//    svm.points.push_back(cv::Point2f(10,10));
+//    svm.points.push_back(cv::Point2f(10,20));
+//    svm.points.push_back(cv::Point2f(10,30));
+//    svm.points.push_back(cv::Point2f(400,350));
+//    svm.points.push_back(cv::Point2f(450,360));
+//    svm.points.push_back(cv::Point2f(450,370));
+//    apply_svm(svm);
+
+
+//    set.data.faces.push_back(cv::Rect(0, 0, set.data.image.cols, set.data.image.rows));
 
 
     return 0;

@@ -3,6 +3,17 @@
 
 namespace {
 
+void matrix_to_vector(const cv::Mat& orig, cv::Mat& dest){
+    std::vector<cv::Mat> rows;
+
+    for (int i = 0; i < orig.rows; ++i) {
+        rows.push_back(orig.row(i));
+    }
+
+    cv::hconcat(rows, dest);
+}
+
+
 #define SETUP_POINTS(input_points, dest) \
     std::for_each(input_points.begin(), input_points.end(), [this] (auto point){ \
         this->dest.push_back(this->points[point]);\
@@ -15,25 +26,29 @@ namespace {
         pt_dat.layer_first = this->origin_image(get_patch(point, this->first_layer_offest)); \
         calculate_histogram(pt_dat.layer_first, 1, 8, 3, 3, \
                             pt_dat.layer_first_lbp, pt_dat.layer_first_hist); \
-        std::cout << "orig: " << pt_dat.layer_first.rows << " | " << pt_dat.layer_first.cols << std::endl; \
         this->data.push_back(pt_dat); \
     });
 
+//cv::Mat dest; \
+matrix_to_vector(pt_dat.layer_first_lbp, dest); \
+dest.convertTo(dest, CV_32F, 1.0 / 255, 0); \
+pt_dat.layer_first_hist = dest; \
 //std::cout << "lbp: " << pt_dat.layer_first_lbp.rows << " | " << pt_dat.layer_first_lbp.cols << std::endl; \
+std::cout << "orig: " << pt_dat.layer_first.rows << " | " << pt_dat.layer_first.cols << std::endl; \
 //std::cout << "hist: " << pt_dat.layer_first_hist.rows << " | " << pt_dat.layer_first_hist.cols << std::endl; \
 //cv::imwrite("test.png", pt_dat.layer_first_lbp);
 
     // std::std::vector<size_t> positions;
-    std::vector<size_t> nose_positions = {31, /*32, 33, 34,*/ 35};
-    std::vector<size_t> nose_bridge_positions = {27, /*28, 29, */30};
+    std::vector<size_t> nose_positions = {31, 32, 33, 34, 35};
+    std::vector<size_t> nose_bridge_positions = {27, 28, 29, 30};
     std::vector<size_t> eyebrow_positions = {21, 22};
-    std::vector<size_t> mouth_positions = {48, /*44, 59, 55, 49,*/ 53};
-    std::vector<size_t> left_eye_positions = {36, /*37, 38, 39, 40,*/ 41};
-    std::vector<size_t> right_eye_positions = {42, /*43, 44, 45, 46,*/ 47};
+    std::vector<size_t> mouth_positions = {48, 54, 59, 55, 49, 53};
+    std::vector<size_t> left_eye_positions = {36, 37, 38, 39, 40, 41};
+    std::vector<size_t> right_eye_positions = {42, 43, 44, 45, 46, 47};
 }
 
 points_processor::points_processor(Mat image, std::vector<Point2f> shapes): points(shapes),
-    first_layer_offest(4)
+    first_layer_offest(16)
 {
     cv::cvtColor(image, origin_image, COLOR_RGB2GRAY);
     SETUP_POINTS(nose_positions, nose_points);
@@ -138,7 +153,7 @@ void face_matcher::apply_svm(std::string save_path) {
     // Train the SVM
     svm->setType(cv::ml::SVM::C_SVC);
     svm->setKernel(cv::ml::SVM::LINEAR);
-    svm->setTermCriteria(cv::TermCriteria(cv::TermCriteria::MAX_ITER, 100, 1e-6));
+    svm->setTermCriteria(cv::TermCriteria(cv::TermCriteria::MAX_ITER, 200, 1e-6));
     svm->train(training_vectors, cv::ml::ROW_SAMPLE, lables);
     cout << "Finished training process" << endl;
 
